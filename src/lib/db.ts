@@ -1,12 +1,16 @@
-// IndexedDB 本地持久化：保存视场配置与天球坐标锚定的批注。
+// IndexedDB 本地持久化：保存视场配置、天球坐标锚定的批注、角距尺测量记录。
 // 无后端；所有数据仅存于浏览器。Promise 风格的极简封装。
+//
+// 三个对象库相互独立：删除测量记录只影响 measurements 库，
+// 不会触碰内置目标（静态星表，不入库）与普通批注（annotations 库）。
 
-import type { Annotation, SavedFov } from '../types';
+import type { Annotation, Measurement, SavedFov } from '../types';
 
 const DB_NAME = 'local-starchart';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORE_FOVS = 'fovs';
 const STORE_ANNOTATIONS = 'annotations';
+const STORE_MEASUREMENTS = 'measurements';
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 
@@ -21,6 +25,10 @@ function openDb(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains(STORE_ANNOTATIONS)) {
         db.createObjectStore(STORE_ANNOTATIONS, { keyPath: 'uuid' });
+      }
+      // v2 新增：角距尺测量记录
+      if (!db.objectStoreNames.contains(STORE_MEASUREMENTS)) {
+        db.createObjectStore(STORE_MEASUREMENTS, { keyPath: 'uuid' });
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -65,4 +73,19 @@ export async function getAllAnnotations(): Promise<Annotation[]> {
 
 export async function deleteAnnotation(uuid: string): Promise<void> {
   await tx(STORE_ANNOTATIONS, 'readwrite', (s) => s.delete(uuid));
+}
+
+// ---------- 角距尺测量记录（独立对象库，删除不影响目标与批注） ----------
+
+export async function putMeasurement(m: Measurement): Promise<void> {
+  await tx(STORE_MEASUREMENTS, 'readwrite', (s) => s.put(m));
+}
+
+export async function getAllMeasurements(): Promise<Measurement[]> {
+  const all = await tx<Measurement[]>(STORE_MEASUREMENTS, 'readonly', (s) => s.getAll());
+  return all.sort((a, b) => b.createdAt - a.createdAt);
+}
+
+export async function deleteMeasurement(uuid: string): Promise<void> {
+  await tx(STORE_MEASUREMENTS, 'readwrite', (s) => s.delete(uuid));
 }

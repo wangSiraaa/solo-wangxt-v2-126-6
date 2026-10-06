@@ -1,10 +1,11 @@
 // 控制面板：观测位置/时间、视场中心与角半径、星等与地平线独立筛选、
-// 演示场景、视场与批注的 IndexedDB 存取。
+// 演示场景、视场/批注/角距尺测量记录的 IndexedDB 存取。
 
 import { useState } from 'react';
 import { OBSERVING_SITES } from '../data/sites';
 import { DEMO_SCENARIOS } from '../data/scenarios';
-import type { FovConfig, SavedFov, Annotation, SiteState } from '../types';
+import type { SkyTarget } from '../lib/computeSky';
+import type { FovConfig, SavedFov, Annotation, Measurement, SiteState } from '../types';
 
 interface ControlsProps {
   site: SiteState;
@@ -16,6 +17,13 @@ interface ControlsProps {
   showGraticule: boolean;
   savedFovs: SavedFov[];
   annotations: Annotation[];
+  /** 角距尺可选的内置目标（恒星 + 太阳系天体） */
+  rulerTargets: SkyTarget[];
+  rulerFromId: string | null;
+  rulerToId: string | null;
+  /** 当前起终点的球面角距（度），未选全为 null */
+  rulerSeparation: number | null;
+  measurements: Measurement[];
   onChangeSite: (site: SiteState) => void;
   onChangeTime: (iso: string) => void;
   onChangeFov: (fov: FovConfig) => void;
@@ -29,6 +37,10 @@ interface ControlsProps {
   onDeleteFov: (uuid: string) => void;
   onAddAnnotation: (text: string, color: string) => void;
   onDeleteAnnotation: (uuid: string) => void;
+  onChangeRuler: (fromId: string | null, toId: string | null) => void;
+  onSaveMeasurement: () => void;
+  onLoadMeasurement: (m: Measurement) => void;
+  onDeleteMeasurement: (uuid: string) => void;
 }
 
 export default function Controls(p: ControlsProps) {
@@ -148,6 +160,67 @@ export default function Controls(p: ControlsProps) {
           <input type="checkbox" checked={p.showGraticule} onChange={(e) => p.onToggleGraticule(e.target.checked)} />
           显示 J2000 经纬网
         </label>
+      </section>
+
+      <section className="ctl-block">
+        <h3>球面角距尺（J2000 短大圆弧）</h3>
+        <label>
+          起点目标
+          <select value={p.rulerFromId ?? ''} onChange={(e) => p.onChangeRuler(e.target.value || null, p.rulerToId)}>
+            <option value="">— 选择内置目标 —</option>
+            {p.rulerTargets.map((t) => (
+              <option key={t.id} value={t.id}>
+                {t.name}（{t.designation}）
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          终点目标
+          <select value={p.rulerToId ?? ''} onChange={(e) => p.onChangeRuler(p.rulerFromId, e.target.value || null)}>
+            <option value="">— 选择内置目标 —</option>
+            {p.rulerTargets.map((t) => (
+              <option key={t.id} value={t.id}>
+                {t.name}（{t.designation}）
+              </option>
+            ))}
+          </select>
+        </label>
+        {p.rulerSeparation !== null && (
+          <p className="ruler-readout">
+            球面角距 = <strong>{p.rulerSeparation.toFixed(4)}°</strong>（短大圆弧 · haversine · J2000）
+          </p>
+        )}
+        <p className="hint">
+          角距只由两端点 J2000 坐标决定：切换投影、缩放或平移视场均不改变。
+          图上的像素长度仅为投影读数，不能当作角距；跨 0h 赤经的两星自动走短弧。
+        </p>
+        <button
+          className="btn"
+          disabled={p.rulerSeparation === null || p.rulerFromId === p.rulerToId}
+          onClick={p.onSaveMeasurement}
+          title="把当前起终点、角距与当前视场快照存入 IndexedDB"
+        >
+          保存测量（随当前视场存 IndexedDB）
+        </button>
+        {p.measurements.length > 0 && (
+          <ul className="store-list">
+            {p.measurements.map((m) => (
+              <li key={m.uuid}>
+                <button
+                  className="link-btn"
+                  title={`恢复端点与保存时视场（RA ${m.fov.centerRa.toFixed(1)}° Dec ${m.fov.centerDec.toFixed(1)}° r ${m.fov.radiusDeg}°）`}
+                  onClick={() => p.onLoadMeasurement(m)}
+                >
+                  {m.fromName} ↔ {m.toName} · {m.separationDeg.toFixed(3)}°
+                </button>
+                <button className="x-btn" title="仅删除该测量记录，不影响目标与普通批注" onClick={() => p.onDeleteMeasurement(m.uuid)}>
+                  ×
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
       </section>
 
       <section className="ctl-block">

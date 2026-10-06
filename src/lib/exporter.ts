@@ -12,7 +12,7 @@ import {
   type ProjectionKind
 } from './projections';
 import type { SkyModel, SkyTarget } from './computeSky';
-import type { FovConfig, SiteState, Annotation } from '../types';
+import type { FovConfig, SiteState, Annotation, ActiveRuler, Measurement } from '../types';
 import { formatDec, formatRA } from './geoMath';
 
 export interface ExportMeta {
@@ -36,13 +36,15 @@ export function buildStandaloneSvg(
   sky: SkyModel,
   visibleTargets: SkyTarget[],
   annotations: Annotation[],
-  meta: ExportMeta
+  meta: ExportMeta,
+  ruler: ActiveRuler | null = null
 ): string {
   const built = buildProjection(kind, meta.fov.centerRa, meta.fov.centerDec, meta.fov.radiusDeg);
   const C = VIEW_SIZE / 2;
   const pad = 30;
   const headerH = 70;
-  const footerH = 92;
+  // 有角距尺时图注多一行（端点 + 坐标系 + 角距）
+  const footerH = ruler ? 110 : 92;
   const W = VIEW_SIZE + pad * 2;
   const H = VIEW_SIZE + pad * 2 + headerH + footerH;
   const x0 = pad;
@@ -106,6 +108,23 @@ export function buildStandaloneSvg(
     })
     .join('');
 
+  // 角距尺：短大圆弧按本投影的球面裁剪规则绘制；角距标注只取球面值
+  let rulerEls = '';
+  if (ruler) {
+    const d = built.path({ type: 'LineString', coordinates: ruler.arc });
+    const p1 = built.projection([ruler.fromRa, ruler.fromDec]);
+    const p2 = built.projection([ruler.toRa, ruler.toDec]);
+    const mid = ruler.arc[Math.floor(ruler.arc.length / 2)];
+    const pm = built.projection([mid[0], mid[1]]);
+    rulerEls =
+      `<path d="${d}" fill="none" stroke="#ffb74d" stroke-width="2" stroke-dasharray="7 4"/>` +
+      (p1 ? `<circle cx="${p1[0].toFixed(1)}" cy="${p1[1].toFixed(1)}" r="4" fill="#ffb74d"/>` : '') +
+      (p2 ? `<circle cx="${p2[0].toFixed(1)}" cy="${p2[1].toFixed(1)}" r="4" fill="#ffb74d"/>` : '') +
+      (pm
+        ? `<text x="${(pm[0] + 6).toFixed(1)}" y="${(pm[1] - 6).toFixed(1)}" font-size="11.5" fill="#ffb74d">${ruler.separationDeg.toFixed(2)}°</text>`
+        : '');
+  }
+
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" font-family="sans-serif">
 <rect width="${W}" height="${H}" fill="#070a14"/>
 <text x="${x0}" y="28" font-size="20" font-weight="bold" fill="#eaf1ff">本地星图 · ${esc(meta.projectionLabel)}</text>
@@ -125,6 +144,7 @@ ${rings.map((d) => `<path d="${d}" fill="none" stroke="#3d6ea5" stroke-width="0.
 ${starEls}
 ${labelEls}
 ${annoEls}
+${rulerEls}
 </g>
 </g>
 <g transform="translate(${x0},${y0 + VIEW_SIZE + 26})" font-size="11.5" fill="#9fb4d8">
@@ -132,6 +152,11 @@ ${annoEls}
 <text x="0" y="18">观测位置：${esc(meta.site.name)}（纬度 ${meta.site.latitude.toFixed(4)}°，经度 ${meta.site.longitude.toFixed(4)}°，海拔 ${meta.site.height} m）</text>
 <text x="0" y="36">筛选：星等 ≤ ${meta.magLimit}（仅恒星）；地平线裁切：${meta.horizonClip ? '开启（仅地平以上）' : '关闭（地平以下目标半透明显示）'}。地平坐标由 astronomy-engine Rotation_EQJ_HOR 转换，无大气折射改正。</text>
 <text x="0" y="54">角距均按球面（haversine）计算；图上像素距离不作为实际角距。太阳系天体坐标为含光行差的 J2000 视位置。星表为 J2000 近似值，仅供科普制图。</text>
+${
+  ruler
+    ? `<text x="0" y="72" fill="#ffb74d">角距尺：${esc(ruler.fromName)}（J2000 ${formatRA(ruler.fromRa)} / ${formatDec(ruler.fromDec)}）↔ ${esc(ruler.toName)}（J2000 ${formatRA(ruler.toRa)} / ${formatDec(ruler.toDec)}）；坐标系 J2000.0 平赤道/平春分点；球面角距 = ${ruler.separationDeg.toFixed(4)}°（短大圆弧 haversine）。橙色尺线的图上像素长度仅为投影读数，不代表角距。</text>`
+    : ''
+}
 </g>
 </svg>`;
 }
@@ -177,7 +202,13 @@ export async function downloadPngFromSvg(svg: string, filename: string, scale = 
   }, 'image/png');
 }
 
-export function buildExportJson(sky: SkyModel, visibleTargets: SkyTarget[], annotations: Annotation[], meta: ExportMeta): string {
+export function buildExportJson(
+  sky: SkyModel,
+  visibleTargets: SkyTarget[],
+  annotations: Annotation[],
+  meta: ExportMeta,
+  measurements: Measurement[] = []
+): string {
   return JSON.stringify(
     {
       tool: 'local-starchart',
@@ -202,7 +233,22 @@ export function buildExportJson(sky: SkyModel, visibleTargets: SkyTarget[], anno
         altitude_deg: Number(t.alt.toFixed(3)),
         angularSeparationFromCenter_deg: Number(t.sepFromCenter.toFixed(3))
       })),
-      annotations
+      annotations,
+      // 角距尺测量记录：端点 J2000 坐标 + 球面角距（保存时固化，与投影/视场缩放无关）
+      measurements: measurements.map((m) => ({
+        uuid: m.uuid,
+        createdAt: m.createdAt,
+        coordinateSystem: 'J2000.0 mean equator & equinox',
+        from: { id: m.fromId, name: m.fromName, ra_J2000_deg: m.fromRa, dec_J2000_deg: m.fromDec },
+        to: { id: m.toId, name: m.toName, ra_J2000_deg: m.toRa, dec_J2000_deg: m.toDec },
+        angularSeparation_deg: m.separationDeg,
+        arc: 'short great-circle arc (haversine separation)',
+        fieldOfViewSnapshot: {
+          centerRA_J2000_deg: m.fov.centerRa,
+          centerDec_J2000_deg: m.fov.centerDec,
+          angularRadius_deg: m.fov.radiusDeg
+        }
+      }))
     },
     null,
     2

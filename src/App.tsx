@@ -9,7 +9,7 @@ import Controls from './components/Controls';
 import InfoPanel from './components/InfoPanel';
 import { SkyEpoch } from './lib/astronomy';
 import { computeSky, isTargetVisible, type SkyModel } from './lib/computeSky';
-import { fovBoundary } from './lib/geoMath';
+import { angularSeparation, fovBoundary, greatCircleArc } from './lib/geoMath';
 import {
   buildExportJson,
   buildStandaloneSvg,
@@ -17,10 +17,20 @@ import {
   downloadText,
   type ExportMeta
 } from './lib/exporter';
-import { deleteAnnotation, deleteFov, getAllAnnotations, getAllFovs, putAnnotation, putFov } from './lib/db';
+import {
+  deleteAnnotation,
+  deleteFov,
+  deleteMeasurement,
+  getAllAnnotations,
+  getAllFovs,
+  getAllMeasurements,
+  putAnnotation,
+  putFov,
+  putMeasurement
+} from './lib/db';
 import { DEMO_SCENARIOS } from './data/scenarios';
 import { OBSERVING_SITES } from './data/sites';
-import type { Annotation, FovConfig, SavedFov, SiteState } from './types';
+import type { ActiveRuler, Annotation, FovConfig, Measurement, SavedFov, SiteState } from './types';
 
 const DEFAULT_SITE: SiteState = OBSERVING_SITES[0];
 const DEFAULT_TIME = '2026-09-30T13:00:00Z';
@@ -43,11 +53,16 @@ export default function App() {
   const [focusToken, setFocusToken] = useState<{ id: string; nonce: number } | null>(null);
   const [savedFovs, setSavedFovs] = useState<SavedFov[]>([]);
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
+  // 角距尺：起终点（内置目标 id）与已存测量记录
+  const [rulerFromId, setRulerFromId] = useState<string | null>(null);
+  const [rulerToId, setRulerToId] = useState<string | null>(null);
+  const [measurements, setMeasurements] = useState<Measurement[]>([]);
 
   // 初始载入 IndexedDB
   useEffect(() => {
     getAllFovs().then(setSavedFovs).catch(() => undefined);
     getAllAnnotations().then(setAnnotations).catch(() => undefined);
+    getAllMeasurements().then(setMeasurements).catch(() => undefined);
   }, []);
 
   // 历元（位置+时间）；SkyEpoch 内部调用 astronomy-engine 建旋转矩阵
@@ -70,6 +85,27 @@ export default function App() {
     () => (selectedId && sky ? sky.targets.find((t) => t.id === selectedId) ?? null : null),
     [selectedId, sky]
   );
+
+  // 当前激活的角距尺：角距与短大圆弧只由两端点 J2000 坐标派生，
+  // 与投影方式、视场缩放无关（切换投影/缩放视场角距不变）。
+  const activeRuler: ActiveRuler | null = useMemo(() => {
+    if (!sky || !rulerFromId || !rulerToId) return null;
+    const from = sky.targets.find((t) => t.id === rulerFromId);
+    const to = sky.targets.find((t) => t.id === rulerToId);
+    if (!from || !to) return null;
+    return {
+      fromId: from.id,
+      fromName: from.name,
+      fromRa: from.ra,
+      fromDec: from.dec,
+      toId: to.id,
+      toName: to.name,
+      toRa: to.ra,
+      toDec: to.dec,
+      separationDeg: angularSeparation(from.ra, from.dec, to.ra, to.dec),
+      arc: greatCircleArc(from.ra, from.dec, to.ra, to.dec, 96)
+    };
+  }, [sky, rulerFromId, rulerToId]);
 
   // 点击任一视图：同步选中 + 三维视图聚焦
   const selectTarget = (id: string | null) => {
@@ -118,6 +154,35 @@ export default function App() {
   };
   const removeAnnotation = (id: string) => deleteAnnotation(id).then(() => getAllAnnotations().then(setAnnotations));
 
+  // 角距尺测量记录：随当前视场快照存入 IndexedDB（独立 measurements 库）
+  const saveMeasurement = () => {
+    if (!activeRuler) return;
+    const rec: Measurement = {
+      uuid: uuid(),
+      createdAt: Date.now(),
+      fromId: activeRuler.fromId,
+      fromName: activeRuler.fromName,
+      fromRa: activeRuler.fromRa,
+      fromDec: activeRuler.fromDec,
+      toId: activeRuler.toId,
+      toName: activeRuler.toName,
+      toRa: activeRuler.toRa,
+      toDec: activeRuler.toDec,
+      separationDeg: activeRuler.separationDeg,
+      fov: { ...fov }
+    };
+    putMeasurement(rec).then(() => getAllMeasurements().then(setMeasurements));
+  };
+  // 载入记录：恢复起终点与该记录保存时的视场
+  const loadMeasurement = (m: Measurement) => {
+    setRulerFromId(m.fromId);
+    setRulerToId(m.toId);
+    setFov({ ...m.fov });
+  };
+  // 删除测量记录：只删 measurements 库，不动内置目标与普通批注
+  const removeMeasurement = (id: string) =>
+    deleteMeasurement(id).then(() => getAllMeasurements().then(setMeasurements));
+
   // 导出
   const exportMeta = (label: string): ExportMeta | null => {
     if (!sky) return null;
@@ -138,7 +203,7 @@ export default function App() {
     const label = kind === 'stereographic' ? '立体投影 Stereographic' : '等距方位投影 Azimuthal Equidistant';
     const meta = exportMeta(label)!;
     const visible = sky.targets.filter((t) => isTargetVisible(t, horizonClip));
-    const svg = buildStandaloneSvg(kind, sky, visible, annotations, meta);
+    const svg = buildStandaloneSvg(kind, sky, visible, annotations, meta, activeRuler);
     downloadText(`星图_${kind}_${timeIso.slice(0, 10)}.svg`, svg, 'image/svg+xml;charset=utf-8');
   };
   const doExportPng = async (kind: 'stereographic' | 'equidistant') => {
@@ -146,14 +211,18 @@ export default function App() {
     const label = kind === 'stereographic' ? '立体投影 Stereographic' : '等距方位投影 Azimuthal Equidistant';
     const meta = exportMeta(label)!;
     const visible = sky.targets.filter((t) => isTargetVisible(t, horizonClip));
-    const svg = buildStandaloneSvg(kind, sky, visible, annotations, meta);
+    const svg = buildStandaloneSvg(kind, sky, visible, annotations, meta, activeRuler);
     await downloadPngFromSvg(svg, `星图_${kind}_${timeIso.slice(0, 10)}.png`);
   };
   const doExportJson = () => {
     if (!sky) return;
     const meta = exportMeta('数据导出 JSON')!;
     const visible = sky.targets.filter((t) => isTargetVisible(t, horizonClip));
-    downloadText(`星表视场_${timeIso.slice(0, 10)}.json`, buildExportJson(sky, visible, annotations, meta), 'application/json');
+    downloadText(
+      `星表视场_${timeIso.slice(0, 10)}.json`,
+      buildExportJson(sky, visible, annotations, meta, measurements),
+      'application/json'
+    );
   };
 
   return (
@@ -185,6 +254,11 @@ export default function App() {
             showGraticule={showGraticule}
             savedFovs={savedFovs}
             annotations={annotations}
+            rulerTargets={sky?.targets ?? []}
+            rulerFromId={rulerFromId}
+            rulerToId={rulerToId}
+            rulerSeparation={activeRuler ? activeRuler.separationDeg : null}
+            measurements={measurements}
             onChangeSite={setSite}
             onChangeTime={setTimeIso}
             onChangeFov={setFov}
@@ -198,6 +272,13 @@ export default function App() {
             onDeleteFov={removeFov}
             onAddAnnotation={addAnnotation}
             onDeleteAnnotation={removeAnnotation}
+            onChangeRuler={(fromId, toId) => {
+              setRulerFromId(fromId);
+              setRulerToId(toId);
+            }}
+            onSaveMeasurement={saveMeasurement}
+            onLoadMeasurement={loadMeasurement}
+            onDeleteMeasurement={removeMeasurement}
           />
         </aside>
 
@@ -212,6 +293,7 @@ export default function App() {
                   horizonClip={horizonClip}
                   showGraticule={showGraticule}
                   annotations={annotations}
+                  ruler={activeRuler}
                   selectedId={selectedId}
                   hoverId={hoverId}
                   onSelect={selectTarget}
@@ -229,6 +311,7 @@ export default function App() {
                   horizonClip={horizonClip}
                   showHorizon={showHorizon}
                   annotations={annotations}
+                  ruler={activeRuler}
                   selectedId={selectedId}
                   hoverId={hoverId}
                   onSelect={selectTarget}
@@ -241,6 +324,7 @@ export default function App() {
                   horizonClip={horizonClip}
                   showHorizon={showHorizon}
                   annotations={annotations}
+                  ruler={activeRuler}
                   selectedId={selectedId}
                   hoverId={hoverId}
                   onSelect={selectTarget}

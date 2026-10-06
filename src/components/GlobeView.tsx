@@ -8,7 +8,7 @@
 import { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import type { SkyModel, SkyTarget } from '../lib/computeSky';
-import type { FovConfig, Annotation } from '../types';
+import type { FovConfig, Annotation, ActiveRuler } from '../types';
 import { DEG } from '../lib/geoMath';
 
 interface GlobeViewProps {
@@ -17,6 +17,8 @@ interface GlobeViewProps {
   horizonClip: boolean;
   showGraticule: boolean;
   annotations: Annotation[];
+  /** 当前激活的角距尺（J2000 短大圆弧），无则为 null */
+  ruler: ActiveRuler | null;
   selectedId: string | null;
   hoverId: string | null;
   onSelect: (id: string | null) => void;
@@ -121,6 +123,7 @@ class GlobeScene {
   private highlight: THREE.Mesh;
   private labelsGroup = new THREE.Group();
   private annotationsGroup = new THREE.Group();
+  private rulerGroup = new THREE.Group();
   private raycaster = new THREE.Raycaster();
   private pickSphere: THREE.Mesh;
   private drag: DragState = { active: false, x: 0, y: 0, moved: 0 };
@@ -164,6 +167,7 @@ class GlobeScene {
     this.scene.add(this.graticuleGroup);
     this.scene.add(this.labelsGroup);
     this.scene.add(this.annotationsGroup);
+    this.scene.add(this.rulerGroup);
 
     this.initStars();
     this.initStaticFrames();
@@ -452,6 +456,9 @@ class GlobeScene {
     // 批注
     this.rebuildAnnotations(props);
 
+    // 角距尺短大圆弧
+    this.rebuildRuler(props);
+
     // 高亮
     const sel = props.selectedId ? props.sky.targets.find((t) => t.id === props.selectedId) : null;
     if (sel) {
@@ -558,6 +565,56 @@ class GlobeScene {
       const sp = this.makeTextSprite(`📝 ${a.text}`, new THREE.Vector3(t.hx, t.hy, t.hz), a.color);
       this.annotationsGroup.add(sp);
     }
+  }
+
+  /**
+   * 角距尺：在天球上画两端点间的短大圆弧。
+   * 在地平直角坐标中对两个端点单位向量做 slerp——EQJ→HOR 是刚体旋转，
+   * 与在 J2000 赤道坐标中 slerp 得到同一条大圆弧；angleTo ∈ [0,π] 保证短弧。
+   */
+  private rebuildRuler(props: GlobeViewProps) {
+    [...this.rulerGroup.children].forEach((c) => {
+      const o = c as THREE.Line & THREE.Sprite;
+      o.geometry?.dispose?.();
+      (o.material as THREE.SpriteMaterial)?.map?.dispose?.();
+      (o.material as THREE.Material)?.dispose?.();
+    });
+    this.rulerGroup.clear();
+    const r = props.ruler;
+    if (!r) return;
+    const from = props.sky.targets.find((t) => t.id === r.fromId);
+    const to = props.sky.targets.find((t) => t.id === r.toId);
+    if (!from || !to) return;
+    const v1 = new THREE.Vector3(from.hx, from.hy, from.hz).normalize();
+    const v2 = new THREE.Vector3(to.hx, to.hy, to.hz).normalize();
+    const omega = v1.angleTo(v2);
+    const N = 96;
+    const pts: THREE.Vector3[] = [];
+    if (omega < 1e-9) {
+      pts.push(v1.clone().multiplyScalar(SPHERE_R * 1.004));
+    } else {
+      const so = Math.sin(omega);
+      for (let i = 0; i <= N; i++) {
+        const t = i / N;
+        const a = Math.sin((1 - t) * omega) / so;
+        const b = Math.sin(t * omega) / so;
+        pts.push(
+          v1
+            .clone()
+            .multiplyScalar(a)
+            .add(v2.clone().multiplyScalar(b))
+            .multiplyScalar(SPHERE_R * 1.004)
+        );
+      }
+    }
+    const line = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(pts),
+      new THREE.LineBasicMaterial({ color: 0xffb74d })
+    );
+    this.rulerGroup.add(line);
+    // 弧中点的角距标签
+    const mid = pts[Math.floor(pts.length / 2)].clone().normalize();
+    this.rulerGroup.add(this.makeTextSprite(`📐 ${r.separationDeg.toFixed(2)}°`, mid, '#ffb74d'));
   }
 
   private resize() {

@@ -10,7 +10,7 @@
 
 import { useMemo } from 'react';
 import type { SkyModel, SkyTarget } from '../lib/computeSky';
-import type { FovConfig, Annotation } from '../types';
+import type { FovConfig, Annotation, ActiveRuler } from '../types';
 import {
   belowHorizonObject,
   buildProjection,
@@ -31,6 +31,8 @@ interface ProjectionViewProps {
   horizonClip: boolean;
   showHorizon: boolean;
   annotations: Annotation[];
+  /** 当前激活的角距尺（J2000 短大圆弧），无则为 null */
+  ruler: ActiveRuler | null;
   selectedId: string | null;
   hoverId: string | null;
   onSelect: (id: string | null) => void;
@@ -105,6 +107,20 @@ export default function ProjectionView(props: ProjectionViewProps) {
       })
       .filter((x): x is { a: Annotation; x: number; y: number } => x !== null);
   }, [built, props.annotations]);
+
+  // 角距尺：短大圆弧经本投影的 clipAngle 球面裁剪后绘制；
+  // 端点若落在裁剪窗外则不画端点标记。像素长度只作投影读数。
+  const rulerMark = useMemo(() => {
+    const r = props.ruler;
+    if (!r) return null;
+    const d = built.path({ type: 'LineString', coordinates: r.arc });
+    const p1 = projectPoint(built.projection, r.fromRa, r.fromDec);
+    const p2 = projectPoint(built.projection, r.toRa, r.toDec);
+    const mid = r.arc[Math.floor(r.arc.length / 2)];
+    const pm = projectPoint(built.projection, mid[0], mid[1]);
+    const pxDist = p1 && p2 ? Math.hypot(p2[0] - p1[0], p2[1] - p1[1]) : null;
+    return { d, p1, p2, pm, pxDist };
+  }, [built, props.ruler]);
 
   const selected = props.selectedId ? sky.targets.find((t) => t.id === props.selectedId) : null;
 
@@ -211,6 +227,20 @@ export default function ProjectionView(props: ProjectionViewProps) {
             </g>
           ))}
 
+          {/* 角距尺：短大圆弧（已经本投影球面裁剪） */}
+          {rulerMark && props.ruler && (
+            <g className="ruler-layer">
+              <path d={rulerMark.d} fill="none" stroke="#ffb74d" strokeWidth={2} strokeDasharray="7 4" />
+              {rulerMark.p1 && <circle cx={rulerMark.p1[0]} cy={rulerMark.p1[1]} r={4} fill="#ffb74d" />}
+              {rulerMark.p2 && <circle cx={rulerMark.p2[0]} cy={rulerMark.p2[1]} r={4} fill="#ffb74d" />}
+              {rulerMark.pm && (
+                <text x={rulerMark.pm[0] + 6} y={rulerMark.pm[1] - 6} fill="#ffb74d" fontSize={11.5} className="proj-label">
+                  {props.ruler.separationDeg.toFixed(2)}°
+                </text>
+              )}
+            </g>
+          )}
+
           {/* 中心十字 */}
           <g stroke="#8aa0c8" strokeWidth={1}>
             <line x1={C - 7} y1={C} x2={C + 7} y2={C} />
@@ -226,6 +256,14 @@ export default function ProjectionView(props: ProjectionViewProps) {
             ? `（立体投影边缘径向外放 ×${edgeRatio.toFixed(2)}，图上距离≠角距）`
             : '（等距方位：径向 r 与角距成正比，同心圆为等角距参考环）'}
         </span>
+        {props.ruler && (
+          <span className="proj-foot-ruler">
+            角距尺 {props.ruler.fromName} ↔ {props.ruler.toName}：球面角距 {props.ruler.separationDeg.toFixed(4)}°
+            {rulerMark?.pxDist != null
+              ? `；图上 ${rulerMark.pxDist.toFixed(0)} px 仅为本投影读数，不是角距`
+              : '（端点在当前视场裁剪之外）'}
+          </span>
+        )}
         {selected && (
           <span className="proj-foot-sel">
             {selected.name}：距视场中心 {selected.sepFromCenter.toFixed(2)}°（球面角距）· 高度 {selected.alt.toFixed(1)}°

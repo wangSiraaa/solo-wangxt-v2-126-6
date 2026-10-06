@@ -64,6 +64,33 @@ export function vecToLonLat(x: number, y: number, z: number): [number, number] {
 }
 
 /**
+ * 两点间【短大圆弧】采样（球面线性插值 slerp），返回 [lon,lat] 序列。
+ * 圆心角取 arccos(v1·v2) ∈ [0,π]，因此跨赤经零点（如 359° ↔ 1°）
+ * 自动走短弧，绝不绕远路；采样点供投影绘制，裁剪由投影各自负责。
+ */
+export function greatCircleArc(lon1: number, lat1: number, lon2: number, lat2: number, n = 96): Array<[number, number]> {
+  const v1 = lonLatToVec(lon1, lat1);
+  const v2 = lonLatToVec(lon2, lat2);
+  const dot = clamp1(v1[0] * v2[0] + v1[1] * v2[1] + v1[2] * v2[2]);
+  const omega = Math.acos(dot);
+  if (omega < 1e-12) {
+    return [
+      [lon1, lat1],
+      [lon2, lat2]
+    ];
+  }
+  const so = Math.sin(omega);
+  const pts: Array<[number, number]> = [];
+  for (let i = 0; i <= n; i++) {
+    const t = i / n;
+    const a = Math.sin((1 - t) * omega) / so;
+    const b = Math.sin(t * omega) / so;
+    pts.push(vecToLonLat(a * v1[0] + b * v2[0], a * v1[1] + b * v2[1], a * v1[2] + b * v2[2]));
+  }
+  return pts;
+}
+
+/**
  * 生成以 (centerLon,centerLat) 为中心、角半径 radiusDeg（度）的视场边界。
  * 沿大圆弧等角采样，跨赤经零点时由投影的球面裁剪（clipAngle）处理，
  * 不会被连成横贯整张图的直线。

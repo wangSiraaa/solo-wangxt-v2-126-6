@@ -333,6 +333,20 @@ body,
   color: #ffe08a;
 }
 
+.proj-foot-ruler {
+  color: #ffb74d;
+}
+
+.ruler-readout {
+  margin: 6px 0 0;
+  color: #ffb74d;
+  font-size: 12px;
+}
+
+.ruler-readout strong {
+  font-size: 14px;
+}
+
 .info-panel {
   margin-top: 12px;
   background: var(--panel);
