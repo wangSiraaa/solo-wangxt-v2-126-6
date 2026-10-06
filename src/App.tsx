@@ -9,7 +9,7 @@ import Controls from './components/Controls';
 import InfoPanel from './components/InfoPanel';
 import { SkyEpoch } from './lib/astronomy';
 import { computeSky, isTargetVisible, type SkyModel } from './lib/computeSky';
-import { fovBoundary } from './lib/geoMath';
+import { angularSeparation, fovBoundary } from './lib/geoMath';
 import {
   buildExportJson,
   buildStandaloneSvg,
@@ -17,10 +17,20 @@ import {
   downloadText,
   type ExportMeta
 } from './lib/exporter';
-import { deleteAnnotation, deleteFov, getAllAnnotations, getAllFovs, putAnnotation, putFov } from './lib/db';
+import {
+  deleteAnnotation,
+  deleteFov,
+  deleteMeasurement,
+  getAllAnnotations,
+  getAllFovs,
+  getAllMeasurements,
+  putAnnotation,
+  putFov,
+  putMeasurement
+} from './lib/db';
 import { DEMO_SCENARIOS } from './data/scenarios';
 import { OBSERVING_SITES } from './data/sites';
-import type { Annotation, FovConfig, SavedFov, SiteState } from './types';
+import type { Annotation, FovConfig, Measurement, MeasurementEndpoint, SavedFov, SiteState } from './types';
 
 const DEFAULT_SITE: SiteState = OBSERVING_SITES[0];
 const DEFAULT_TIME = '2026-09-30T13:00:00Z';
@@ -43,11 +53,16 @@ export default function App() {
   const [focusToken, setFocusToken] = useState<{ id: string; nonce: number } | null>(null);
   const [savedFovs, setSavedFovs] = useState<SavedFov[]>([]);
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
+  const [measurements, setMeasurements] = useState<Measurement[]>([]);
+  // 球面角距尺的端点选择（目标 id）；可在下拉里选，也可"先点目标再设为端点"
+  const [measureFromId, setMeasureFromId] = useState<string | null>(null);
+  const [measureToId, setMeasureToId] = useState<string | null>(null);
 
   // 初始载入 IndexedDB
   useEffect(() => {
     getAllFovs().then(setSavedFovs).catch(() => undefined);
     getAllAnnotations().then(setAnnotations).catch(() => undefined);
+    getAllMeasurements().then(setMeasurements).catch(() => undefined);
   }, []);
 
   // 历元（位置+时间）；SkyEpoch 内部调用 astronomy-engine 建旋转矩阵
@@ -65,6 +80,12 @@ export default function App() {
   }, [epoch, fov, magLimit, horizonClip, boundaryPts]);
 
   const graticule = useMemo(() => epoch?.graticuleHorizontal(), [epoch]);
+
+  // J2000 -> 本地地平单位向量（供天球视图绘制测量短弧）
+  const eqToHorizontal = useMemo(() => {
+    if (!epoch) return undefined;
+    return (raDeg: number, decDeg: number): [number, number, number] => epoch.centerHorizontalVec(raDeg, decDeg);
+  }, [epoch]);
 
   const selectedTarget = useMemo(
     () => (selectedId && sky ? sky.targets.find((t) => t.id === selectedId) ?? null : null),
@@ -118,6 +139,50 @@ export default function App() {
   };
   const removeAnnotation = (id: string) => deleteAnnotation(id).then(() => getAllAnnotations().then(setAnnotations));
 
+  // ---------------- 球面角距尺 ----------------
+
+  // 可选端点：当前内置目标全集（星表恒星 + 日月行星）；坐标以建档时实际值固化
+  const targetOptions = useMemo(() => {
+    if (!sky) return [];
+    return sky.targets
+      .map((t) => ({ id: t.id, label: `${t.name}（${t.designation}）` }))
+      .sort((a, b) => a.label.localeCompare(b.label, 'zh'));
+  }, [sky]);
+
+  const endpointOf = (targetId: string | null): MeasurementEndpoint | null => {
+    if (!targetId || !sky) return null;
+    const t = sky.targets.find((x) => x.id === targetId);
+    if (!t) return null;
+    return { targetId: t.id, name: t.name, designation: t.designation, ra: t.ra, dec: t.dec, kind: t.kind };
+  };
+
+  const draftFrom = endpointOf(measureFromId);
+  const draftTo = endpointOf(measureToId);
+  // 草稿角距（J2000 球面 haversine，短大圆弧）——切换投影/缩放视场均不变
+  const draftSeparation =
+    draftFrom && draftTo && draftFrom.targetId !== draftTo.targetId
+      ? angularSeparation(draftFrom.ra, draftFrom.dec, draftTo.ra, draftTo.dec)
+      : null;
+
+  const createMeasurement = (color: string) => {
+    if (!draftFrom || !draftTo || draftFrom.targetId === draftTo.targetId) {
+      alert('请选择两个不同的内置目标作为起点与终点。');
+      return;
+    }
+    const m: Measurement = {
+      uuid: uuid(),
+      createdAt: Date.now(),
+      from: draftFrom,
+      to: draftTo,
+      separationDeg: angularSeparation(draftFrom.ra, draftFrom.dec, draftTo.ra, draftTo.dec),
+      fov: { ...fov },
+      color
+    };
+    putMeasurement(m).then(() => getAllMeasurements().then(setMeasurements));
+  };
+  const removeMeasurement = (id: string) =>
+    deleteMeasurement(id).then(() => getAllMeasurements().then(setMeasurements));
+
   // 导出
   const exportMeta = (label: string): ExportMeta | null => {
     if (!sky) return null;
@@ -138,7 +203,7 @@ export default function App() {
     const label = kind === 'stereographic' ? '立体投影 Stereographic' : '等距方位投影 Azimuthal Equidistant';
     const meta = exportMeta(label)!;
     const visible = sky.targets.filter((t) => isTargetVisible(t, horizonClip));
-    const svg = buildStandaloneSvg(kind, sky, visible, annotations, meta);
+    const svg = buildStandaloneSvg(kind, sky, visible, annotations, meta, measurements);
     downloadText(`星图_${kind}_${timeIso.slice(0, 10)}.svg`, svg, 'image/svg+xml;charset=utf-8');
   };
   const doExportPng = async (kind: 'stereographic' | 'equidistant') => {
@@ -146,14 +211,18 @@ export default function App() {
     const label = kind === 'stereographic' ? '立体投影 Stereographic' : '等距方位投影 Azimuthal Equidistant';
     const meta = exportMeta(label)!;
     const visible = sky.targets.filter((t) => isTargetVisible(t, horizonClip));
-    const svg = buildStandaloneSvg(kind, sky, visible, annotations, meta);
+    const svg = buildStandaloneSvg(kind, sky, visible, annotations, meta, measurements);
     await downloadPngFromSvg(svg, `星图_${kind}_${timeIso.slice(0, 10)}.png`);
   };
   const doExportJson = () => {
     if (!sky) return;
     const meta = exportMeta('数据导出 JSON')!;
     const visible = sky.targets.filter((t) => isTargetVisible(t, horizonClip));
-    downloadText(`星表视场_${timeIso.slice(0, 10)}.json`, buildExportJson(sky, visible, annotations, meta), 'application/json');
+    downloadText(
+      `星表视场_${timeIso.slice(0, 10)}.json`,
+      buildExportJson(sky, visible, annotations, meta, measurements),
+      'application/json'
+    );
   };
 
   return (
@@ -185,6 +254,11 @@ export default function App() {
             showGraticule={showGraticule}
             savedFovs={savedFovs}
             annotations={annotations}
+            measurements={measurements}
+            targetOptions={targetOptions}
+            measureFromId={measureFromId}
+            measureToId={measureToId}
+            draftSeparationDeg={draftSeparation}
             onChangeSite={setSite}
             onChangeTime={setTimeIso}
             onChangeFov={setFov}
@@ -198,6 +272,9 @@ export default function App() {
             onDeleteFov={removeFov}
             onAddAnnotation={addAnnotation}
             onDeleteAnnotation={removeAnnotation}
+            onPickMeasureEndpoint={(which, id) => (which === 'from' ? setMeasureFromId(id) : setMeasureToId(id))}
+            onCreateMeasurement={createMeasurement}
+            onDeleteMeasurement={removeMeasurement}
           />
         </aside>
 
@@ -212,12 +289,14 @@ export default function App() {
                   horizonClip={horizonClip}
                   showGraticule={showGraticule}
                   annotations={annotations}
+                  measurements={measurements}
                   selectedId={selectedId}
                   hoverId={hoverId}
                   onSelect={selectTarget}
                   onHover={setHoverId}
                   focusToken={focusToken}
                   graticuleHorizontal={graticule}
+                  eqToHorizontal={eqToHorizontal}
                 />
               </section>
 
@@ -229,6 +308,7 @@ export default function App() {
                   horizonClip={horizonClip}
                   showHorizon={showHorizon}
                   annotations={annotations}
+                  measurements={measurements}
                   selectedId={selectedId}
                   hoverId={hoverId}
                   onSelect={selectTarget}
@@ -241,6 +321,7 @@ export default function App() {
                   horizonClip={horizonClip}
                   showHorizon={showHorizon}
                   annotations={annotations}
+                  measurements={measurements}
                   selectedId={selectedId}
                   hoverId={hoverId}
                   onSelect={selectTarget}
@@ -254,6 +335,12 @@ export default function App() {
                 centerAz={sky.centerAz}
                 gmstHours={sky.gmstHours}
                 julianDay={sky.julianDay}
+                measurements={measurements}
+                onSetMeasureEndpoint={(which) =>
+                  selectedId && (which === 'from' ? setMeasureFromId(selectedId) : setMeasureToId(selectedId))
+                }
+                onGoToMeasurementFov={(m) => setFov({ ...m.fov })}
+                onDeleteMeasurement={removeMeasurement}
               />
             </>
           ) : (

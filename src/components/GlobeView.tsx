@@ -8,8 +8,8 @@
 import { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import type { SkyModel, SkyTarget } from '../lib/computeSky';
-import type { FovConfig, Annotation } from '../types';
-import { DEG } from '../lib/geoMath';
+import type { FovConfig, Annotation, Measurement } from '../types';
+import { DEG, greatCircleArc } from '../lib/geoMath';
 
 interface GlobeViewProps {
   sky: SkyModel;
@@ -17,6 +17,7 @@ interface GlobeViewProps {
   horizonClip: boolean;
   showGraticule: boolean;
   annotations: Annotation[];
+  measurements: Measurement[];
   selectedId: string | null;
   hoverId: string | null;
   onSelect: (id: string | null) => void;
@@ -25,6 +26,8 @@ interface GlobeViewProps {
   focusToken: { id: string; nonce: number } | null;
   /** J2000 经纬网在本地地平直角坐标中的采样 */
   graticuleHorizontal?: { parallels: number[][][]; meridians: number[][][] };
+  /** J2000 赤经赤纬（度）-> 本地地平单位向量，用于把测量短弧画到天球上 */
+  eqToHorizontal?: (raDeg: number, decDeg: number) => [number, number, number];
 }
 
 const SPHERE_R = 1;
@@ -121,6 +124,7 @@ class GlobeScene {
   private highlight: THREE.Mesh;
   private labelsGroup = new THREE.Group();
   private annotationsGroup = new THREE.Group();
+  private measurementsGroup = new THREE.Group();
   private raycaster = new THREE.Raycaster();
   private pickSphere: THREE.Mesh;
   private drag: DragState = { active: false, x: 0, y: 0, moved: 0 };
@@ -164,6 +168,7 @@ class GlobeScene {
     this.scene.add(this.graticuleGroup);
     this.scene.add(this.labelsGroup);
     this.scene.add(this.annotationsGroup);
+    this.scene.add(this.measurementsGroup);
 
     this.initStars();
     this.initStaticFrames();
@@ -452,6 +457,9 @@ class GlobeScene {
     // 批注
     this.rebuildAnnotations(props);
 
+    // 球面角距尺：J2000 短大圆弧画在天球上（跟随天球周日旋转，角距本身不变）
+    this.rebuildMeasurements(props);
+
     // 高亮
     const sel = props.selectedId ? props.sky.targets.find((t) => t.id === props.selectedId) : null;
     if (sel) {
@@ -557,6 +565,62 @@ class GlobeScene {
       if (!t) continue;
       const sp = this.makeTextSprite(`📝 ${a.text}`, new THREE.Vector3(t.hx, t.hy, t.hz), a.color);
       this.annotationsGroup.add(sp);
+    }
+  }
+
+  private rebuildMeasurements(props: GlobeViewProps) {
+    [...this.measurementsGroup.children].forEach((c) => {
+      const o = c as THREE.Line | THREE.Mesh | THREE.Sprite;
+      (o as THREE.Line).geometry?.dispose?.();
+      const mat = (o as THREE.Mesh).material as THREE.Material | THREE.Material[] | undefined;
+      if (Array.isArray(mat)) mat.forEach((x) => x.dispose());
+      else mat?.dispose?.();
+      if ((o as unknown as { isSprite?: boolean }).isSprite) {
+        (o.material as THREE.SpriteMaterial).map?.dispose();
+      }
+    });
+    this.measurementsGroup.clear();
+
+    const toHor = props.eqToHorizontal;
+    if (!toHor) return;
+
+    for (const m of props.measurements) {
+      const color = new THREE.Color(m.color);
+      // slerp 短大圆弧（J2000），逐点转到本地地平；相机近/远裁剪平面
+      // 只让朝向观察者的半球可见——这就是天球视图自己的"裁切规则"。
+      const arcEq = greatCircleArc(m.from.ra, m.from.dec, m.to.ra, m.to.dec, 128);
+      const pts = arcEq.map(([ra, dec]) => {
+        const [x, y, z] = toHor(ra, dec);
+        return new THREE.Vector3(x, y, z).multiplyScalar(SPHERE_R * 1.004);
+      });
+      const line = new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints(pts),
+        new THREE.LineDashedMaterial({ color, dashSize: 0.03, gapSize: 0.018, transparent: true, opacity: 0.95 })
+      );
+      line.computeLineDistances();
+      this.measurementsGroup.add(line);
+
+      // 端点：起点圆环，终点方块（与两种投影图一致）
+      const [fx, fy, fz] = toHor(m.from.ra, m.from.dec);
+      const ring = new THREE.Mesh(
+        new THREE.TorusGeometry(0.016, 0.0035, 8, 28),
+        new THREE.MeshBasicMaterial({ color })
+      );
+      ring.position.set(fx, fy, fz).multiplyScalar(SPHERE_R * 1.01);
+      ring.lookAt(0, 0, 0);
+      this.measurementsGroup.add(ring);
+
+      const [tx, ty, tz] = toHor(m.to.ra, m.to.dec);
+      const box = new THREE.Mesh(new THREE.BoxGeometry(0.026, 0.026, 0.026), new THREE.MeshBasicMaterial({ color }));
+      box.position.set(tx, ty, tz).multiplyScalar(SPHERE_R * 1.01);
+      this.measurementsGroup.add(box);
+
+      // 角距标签（弧中点）；内容是球面角距，与视角/缩放无关
+      const mid = arcEq[Math.floor(arcEq.length / 2)];
+      const [mx, my, mz] = toHor(mid[0], mid[1]);
+      const sp = this.makeTextSprite(`📏 ${m.separationDeg.toFixed(3)}°`, new THREE.Vector3(mx, my, mz), m.color);
+      sp.scale.set(0.11, 0.0275, 1);
+      this.measurementsGroup.add(sp);
     }
   }
 

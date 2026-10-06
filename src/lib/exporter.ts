@@ -12,8 +12,8 @@ import {
   type ProjectionKind
 } from './projections';
 import type { SkyModel, SkyTarget } from './computeSky';
-import type { FovConfig, SiteState, Annotation } from '../types';
-import { formatDec, formatRA } from './geoMath';
+import type { FovConfig, SiteState, Annotation, Measurement } from '../types';
+import { formatDec, formatRA, greatCircleArc, lineStringObject } from './geoMath';
 
 export interface ExportMeta {
   projectionLabel: string;
@@ -36,13 +36,15 @@ export function buildStandaloneSvg(
   sky: SkyModel,
   visibleTargets: SkyTarget[],
   annotations: Annotation[],
-  meta: ExportMeta
+  meta: ExportMeta,
+  measurements: Measurement[] = []
 ): string {
   const built = buildProjection(kind, meta.fov.centerRa, meta.fov.centerDec, meta.fov.radiusDeg);
   const C = VIEW_SIZE / 2;
   const pad = 30;
   const headerH = 70;
-  const footerH = 92;
+  const measureLines = measurements.length;
+  const footerH = 92 + measureLines * 17;
   const W = VIEW_SIZE + pad * 2;
   const H = VIEW_SIZE + pad * 2 + headerH + footerH;
   const x0 = pad;
@@ -106,6 +108,32 @@ export function buildStandaloneSvg(
     })
     .join('');
 
+  // 球面角距尺：短大圆弧（密集 slerp 采样，交投影球面裁切）、端点、角距
+  const measureEls = measurements
+    .map((m) => {
+      const arc = greatCircleArc(m.from.ra, m.from.dec, m.to.ra, m.to.dec, 160);
+      const d = built.path(lineStringObject(arc));
+      const fp = built.projection([m.from.ra, m.from.dec]);
+      const tp = built.projection([m.to.ra, m.to.dec]);
+      const mid = arc[Math.floor(arc.length / 2)];
+      const mp = built.projection([mid[0], mid[1]]);
+      const parts: string[] = [];
+      if (d) parts.push(`<path d="${d}" fill="none" stroke="${m.color}" stroke-width="2" stroke-dasharray="7 4" stroke-linecap="round"/>`);
+      if (fp) parts.push(`<circle cx="${fp[0].toFixed(1)}" cy="${fp[1].toFixed(1)}" r="4.5" fill="none" stroke="${m.color}" stroke-width="2"/>`);
+      if (tp) parts.push(`<polygon points="${tp[0].toFixed(1)},${(tp[1] - 5).toFixed(1)} ${(tp[0] + 5).toFixed(1)},${tp[1].toFixed(1)} ${tp[0].toFixed(1)},${(tp[1] + 5).toFixed(1)} ${(tp[0] - 5).toFixed(1)},${tp[1].toFixed(1)}" fill="none" stroke="${m.color}" stroke-width="2"/>`);
+      if (mp) parts.push(`<rect x="${(mp[0] - 34).toFixed(1)}" y="${(mp[1] - 20).toFixed(1)}" width="68" height="15" rx="3" fill="#070a14" opacity="0.85" stroke="${m.color}" stroke-width="0.7"/><text x="${mp[0].toFixed(1)}" y="${(mp[1] - 9).toFixed(1)}" font-size="11" font-weight="bold" text-anchor="middle" fill="${m.color}">${m.separationDeg.toFixed(3)}°</text>`);
+      return parts.join('');
+    })
+    .join('');
+
+  // 图注中的测量条目：端点、坐标系、角距（单条）
+  const measureCaptionOne = (m: Measurement): string =>
+    `${esc(m.from.name)}（RA ${formatRA(m.from.ra)} Dec ${formatDec(m.from.dec)}）→ ${esc(m.to.name)}（RA ${formatRA(
+      m.to.ra
+    )} Dec ${formatDec(m.to.dec)}）＝ ${m.separationDeg.toFixed(4)}°；J2000.0 平赤道坐标，短大圆弧 haversine 计算，不随投影/缩放改变。建档视场 RA ${formatRA(
+      m.fov.centerRa
+    )} / ${formatDec(m.fov.centerDec)}，r ${m.fov.radiusDeg.toFixed(1)}°`;
+
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" font-family="sans-serif">
 <rect width="${W}" height="${H}" fill="#070a14"/>
 <text x="${x0}" y="28" font-size="20" font-weight="bold" fill="#eaf1ff">本地星图 · ${esc(meta.projectionLabel)}</text>
@@ -125,6 +153,7 @@ ${rings.map((d) => `<path d="${d}" fill="none" stroke="#3d6ea5" stroke-width="0.
 ${starEls}
 ${labelEls}
 ${annoEls}
+${measureEls}
 </g>
 </g>
 <g transform="translate(${x0},${y0 + VIEW_SIZE + 26})" font-size="11.5" fill="#9fb4d8">
@@ -132,6 +161,12 @@ ${annoEls}
 <text x="0" y="18">观测位置：${esc(meta.site.name)}（纬度 ${meta.site.latitude.toFixed(4)}°，经度 ${meta.site.longitude.toFixed(4)}°，海拔 ${meta.site.height} m）</text>
 <text x="0" y="36">筛选：星等 ≤ ${meta.magLimit}（仅恒星）；地平线裁切：${meta.horizonClip ? '开启（仅地平以上）' : '关闭（地平以下目标半透明显示）'}。地平坐标由 astronomy-engine Rotation_EQJ_HOR 转换，无大气折射改正。</text>
 <text x="0" y="54">角距均按球面（haversine）计算；图上像素距离不作为实际角距。太阳系天体坐标为含光行差的 J2000 视位置。星表为 J2000 近似值，仅供科普制图。</text>
+${measurements
+  .map(
+    (m, i) =>
+      `<text x="0" y="${72 + i * 17}" fill="#b6f0c9">角距尺 ${i + 1}：${measureCaptionOne(m)}</text>`
+  )
+  .join('\n')}
 </g>
 </svg>`;
 }
@@ -177,7 +212,13 @@ export async function downloadPngFromSvg(svg: string, filename: string, scale = 
   }, 'image/png');
 }
 
-export function buildExportJson(sky: SkyModel, visibleTargets: SkyTarget[], annotations: Annotation[], meta: ExportMeta): string {
+export function buildExportJson(
+  sky: SkyModel,
+  visibleTargets: SkyTarget[],
+  annotations: Annotation[],
+  meta: ExportMeta,
+  measurements: Measurement[] = []
+): string {
   return JSON.stringify(
     {
       tool: 'local-starchart',
@@ -202,7 +243,33 @@ export function buildExportJson(sky: SkyModel, visibleTargets: SkyTarget[], anno
         altitude_deg: Number(t.alt.toFixed(3)),
         angularSeparationFromCenter_deg: Number(t.sepFromCenter.toFixed(3))
       })),
-      annotations
+      annotations,
+      angularMeasurements: measurements.map((m) => ({
+        uuid: m.uuid,
+        createdAt: new Date(m.createdAt).toISOString(),
+        coordinateSystem: 'J2000.0 mean equator & equinox',
+        method: 'haversine great-circle separation (short arc)',
+        from: {
+          targetId: m.from.targetId,
+          name: m.from.name,
+          designation: m.from.designation,
+          ra_J2000_deg: Number(m.from.ra.toFixed(6)),
+          dec_J2000_deg: Number(m.from.dec.toFixed(6))
+        },
+        to: {
+          targetId: m.to.targetId,
+          name: m.to.name,
+          designation: m.to.designation,
+          ra_J2000_deg: Number(m.to.ra.toFixed(6)),
+          dec_J2000_deg: Number(m.to.dec.toFixed(6))
+        },
+        angularSeparation_deg: Number(m.separationDeg.toFixed(6)),
+        fieldOfViewAtCreation: {
+          centerRA_J2000_deg: m.fov.centerRa,
+          centerDec_J2000_deg: m.fov.centerDec,
+          angularRadius_deg: m.fov.radiusDeg
+        }
+      }))
     },
     null,
     2

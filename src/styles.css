@@ -420,6 +420,72 @@ body,
   color: var(--red);
 }
 
+/* 球面角距尺 */
+.btn-mini {
+  padding: 3px 8px;
+  font-size: 11px;
+}
+
+.ruler-quick {
+  display: flex;
+  gap: 6px;
+  margin: 6px 0;
+}
+
+.ruler-records {
+  margin-top: 10px;
+  border-top: 1px dashed #1c2942;
+  padding-top: 8px;
+}
+
+.ruler-records-head {
+  color: #b6f0c9;
+  font-size: 11px;
+  margin-bottom: 6px;
+}
+
+.ruler-records table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11.5px;
+}
+
+.ruler-records th {
+  text-align: left;
+  color: var(--muted);
+  font-weight: normal;
+  padding: 3px 6px;
+  border-bottom: 1px solid #1c2942;
+}
+
+.ruler-records td {
+  padding: 4px 6px;
+  border-bottom: 1px dashed #16233c;
+  vertical-align: top;
+}
+
+.ruler-records .num {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.ruler-sep {
+  color: #b6f0c9;
+  font-weight: bold;
+  font-variant-numeric: tabular-nums;
+}
+
+.sub-coord {
+  display: block;
+  color: var(--muted);
+  font-size: 10px;
+  margin-top: 1px;
+}
+
+.ruler-records .dot {
+  margin-right: 5px;
+}
+
 .app-footer {
   padding: 8px 18px;
   font-size: 11px;

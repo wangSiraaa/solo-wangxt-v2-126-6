@@ -10,7 +10,7 @@
 
 import { useMemo } from 'react';
 import type { SkyModel, SkyTarget } from '../lib/computeSky';
-import type { FovConfig, Annotation } from '../types';
+import type { FovConfig, Annotation, Measurement } from '../types';
 import {
   belowHorizonObject,
   buildProjection,
@@ -22,7 +22,7 @@ import {
   VIEW_SIZE,
   type ProjectionKind
 } from '../lib/projections';
-import { formatDec, formatRA } from '../lib/geoMath';
+import { formatDec, formatRA, greatCircleArc, lineStringObject } from '../lib/geoMath';
 
 interface ProjectionViewProps {
   kind: ProjectionKind;
@@ -31,6 +31,7 @@ interface ProjectionViewProps {
   horizonClip: boolean;
   showHorizon: boolean;
   annotations: Annotation[];
+  measurements: Measurement[];
   selectedId: string | null;
   hoverId: string | null;
   onSelect: (id: string | null) => void;
@@ -105,6 +106,22 @@ export default function ProjectionView(props: ProjectionViewProps) {
       })
       .filter((x): x is { a: Annotation; x: number; y: number } => x !== null);
   }, [built, props.annotations]);
+
+  // 球面角距尺：端点间的【短大圆弧】密集采样后交给 D3 投影。
+  // clipAngle 做球面裁剪，跨赤经零点时 D3 在对跖子午线自动切断，
+  // 弧在视场内的可见段照常绘出，不会横贯图面。
+  const measureArcs = useMemo(() => {
+    return props.measurements.map((m) => {
+      const arc = greatCircleArc(m.from.ra, m.from.dec, m.to.ra, m.to.dec, 128);
+      const d = built.path(lineStringObject(arc));
+      // 弧中点（球面 slerp 意义上），把角距标在弧上
+      const mid = arc[Math.floor(arc.length / 2)];
+      const mp = projectPoint(built.projection, mid[0], mid[1]);
+      const fp = projectPoint(built.projection, m.from.ra, m.from.dec);
+      const tp = projectPoint(built.projection, m.to.ra, m.to.dec);
+      return { m, d, midXY: mp, fromXY: fp, toXY: tp };
+    });
+  }, [built, props.measurements]);
 
   const selected = props.selectedId ? sky.targets.find((t) => t.id === props.selectedId) : null;
 
@@ -211,6 +228,34 @@ export default function ProjectionView(props: ProjectionViewProps) {
             </g>
           ))}
 
+          {/* 球面角距尺：短大圆弧 + 端点 + 角距标注 */}
+          {measureArcs.map(({ m, d, midXY, fromXY, toXY }) => (
+            <g key={`m-${m.uuid}`}>
+              {d && <path d={d} fill="none" stroke={m.color} strokeWidth={2} strokeDasharray="7 4" strokeLinecap="round" opacity={0.95} />}
+              {fromXY && <circle cx={fromXY[0]} cy={fromXY[1]} r={4.5} fill="none" stroke={m.color} strokeWidth={2} />}
+              {toXY && (
+                <g transform={`translate(${toXY[0]},${toXY[1]})`}>
+                  <polygon points={`0,-5 5,0 0,5 -5,0`} fill="none" stroke={m.color} strokeWidth={2} />
+                </g>
+              )}
+              {midXY && (
+                <g transform={`translate(${midXY[0]},${midXY[1]})`} pointerEvents="none">
+                  <rect x={-34} y={-20} width={68} height={15} rx={3} fill="#070a14" opacity={0.82} stroke={m.color} strokeWidth={0.7} />
+                  <text
+                    textAnchor="middle"
+                    y={-9}
+                    fontSize={11}
+                    fontWeight="bold"
+                    fill={m.color}
+                    style={{ paintOrder: 'stroke', stroke: '#070a14', strokeWidth: 3 }}
+                  >
+                    {m.separationDeg.toFixed(3)}°
+                  </text>
+                </g>
+              )}
+            </g>
+          ))}
+
           {/* 中心十字 */}
           <g stroke="#8aa0c8" strokeWidth={1}>
             <line x1={C - 7} y1={C} x2={C + 7} y2={C} />
@@ -229,6 +274,11 @@ export default function ProjectionView(props: ProjectionViewProps) {
         {selected && (
           <span className="proj-foot-sel">
             {selected.name}：距视场中心 {selected.sepFromCenter.toFixed(2)}°（球面角距）· 高度 {selected.alt.toFixed(1)}°
+          </span>
+        )}
+        {props.measurements.length > 0 && (
+          <span style={{ color: '#b6f0c9' }}>
+            角距尺 {props.measurements.length} 条：虚线为 J2000 球面短大圆弧（经本投影球面裁切）；角距与投影无关，弧的像素长度只是投影读数。
           </span>
         )}
       </div>

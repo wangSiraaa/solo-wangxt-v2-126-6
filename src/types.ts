@@ -37,3 +37,28 @@ export interface Annotation {
   text: string;
   color: string;
 }
+
+/** 角距尺端点：引用内置目标，同时固化其 J2000 坐标，目标日后移动也不改变已存测量 */
+export interface MeasurementEndpoint {
+  /** 内置目标 id（星表恒星或日月行星） */
+  targetId: string;
+  name: string;
+  designation: string;
+  /** 建档时端点的 J2000 赤经赤纬（度），角距与短弧都按此计算 */
+  ra: number;
+  dec: number;
+  kind: 'star' | 'sun' | 'moon' | 'planet';
+}
+
+export interface Measurement {
+  uuid: string;
+  createdAt: number;
+  /** 起点 → 终点（方向仅用于图上标注，不影响角距） */
+  from: MeasurementEndpoint;
+  to: MeasurementEndpoint;
+  /** 两端点的真实球面角距（度，haversine，短大圆弧） */
+  separationDeg: number;
+  /** 建档时的视场：测量记录随当前视场一起保存 */
+  fov: FovConfig;
+  color: string;
+}

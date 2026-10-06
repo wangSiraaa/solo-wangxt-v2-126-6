@@ -64,6 +64,62 @@ export function vecToLonLat(x: number, y: number, z: number): [number, number] {
 }
 
 /**
+ * 两点间的【短大圆弧】采样（slerp 球面线性插值）。
+ * 直接在单位向量上插值，t∈[0,1] 沿角距最短的大圆走，
+ * 跨赤经零点、跨极点、近对跖点都成立——不依赖经度连续性，
+ * 因此不会出现沿赤道横贯 360° 的长弧。
+ *
+ * @param n 中间采样数（结果 n+1 个点）
+ */
+export function greatCircleArc(lon1: number, lat1: number, lon2: number, lat2: number, n = 96): Array<[number, number]> {
+  const [x1, y1, z1] = lonLatToVec(lon1, lat1);
+  const [x2, y2, z2] = lonLatToVec(lon2, lat2);
+  let cosω = x1 * x2 + y1 * y2 + z1 * z2;
+  cosω = clamp1(cosω);
+  // 完全重合：退化为单点（重复返回，调用方按零长弧处理）
+  if (cosω > 1 - 1e-12) {
+    const p: [number, number] = [((lon1 % 360) + 360) % 360, lat1];
+    return Array.from({ length: n + 1 }, () => [p[0], p[1]]);
+  }
+  const omega = Math.acos(cosω);
+  // 短弧所在大圆的切向基轴 v：u2 在垂直于 u1 方向上的单位分量。
+  // 近对跖点时 sinω≈0、该分量退化，任取一个与 u1 垂直的稳定方向代替
+  // （此时朝哪个方向走 180° 都是合法短弧）。
+  let vx: number, vy: number, vz: number;
+  const sinOmega = Math.sin(omega);
+  if (sinOmega > 1e-9) {
+    vx = (x2 - cosω * x1) / sinOmega;
+    vy = (y2 - cosω * y1) / sinOmega;
+    vz = (z2 - cosω * z1) / sinOmega;
+  } else {
+    // 构造垂直于 u1 的向量：u1 × 参考轴
+    const refAxis = Math.abs(z1) < 0.9 ? [0, 0, 1] : [1, 0, 0];
+    vx = y1 * refAxis[2] - z1 * refAxis[1];
+    vy = z1 * refAxis[0] - x1 * refAxis[2];
+    vz = x1 * refAxis[1] - y1 * refAxis[0];
+    const m = Math.hypot(vx, vy, vz) || 1;
+    vx /= m; vy /= m; vz /= m;
+  }
+  const pts: Array<[number, number]> = [];
+  for (let i = 0; i <= n; i++) {
+    const t = i / n;
+    // p(t) = cos(tΩ)·u1 + sin(tΩ)·v —— 沿 u1→u2 的短大圆弧
+    const a = Math.cos(t * omega);
+    const b = Math.sin(t * omega);
+    const x = a * x1 + b * vx;
+    const y = a * y1 + b * vy;
+    const z = a * z1 + b * vz;
+    pts.push(vecToLonLat(x, y, z));
+  }
+  return pts;
+}
+
+/** GeoJSON LineString 对象（度数坐标对） */
+export function lineStringObject(coords: Array<[number, number]>): object {
+  return { type: 'LineString', coordinates: coords };
+}
+
+/**
  * 生成以 (centerLon,centerLat) 为中心、角半径 radiusDeg（度）的视场边界。
  * 沿大圆弧等角采样，跨赤经零点时由投影的球面裁剪（clipAngle）处理，
  * 不会被连成横贯整张图的直线。

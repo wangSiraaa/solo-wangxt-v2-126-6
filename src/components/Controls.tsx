@@ -4,7 +4,12 @@
 import { useState } from 'react';
 import { OBSERVING_SITES } from '../data/sites';
 import { DEMO_SCENARIOS } from '../data/scenarios';
-import type { FovConfig, SavedFov, Annotation, SiteState } from '../types';
+import type { FovConfig, SavedFov, Annotation, Measurement, SiteState } from '../types';
+
+interface TargetOption {
+  id: string;
+  label: string;
+}
 
 interface ControlsProps {
   site: SiteState;
@@ -16,6 +21,14 @@ interface ControlsProps {
   showGraticule: boolean;
   savedFovs: SavedFov[];
   annotations: Annotation[];
+  measurements: Measurement[];
+  /** 可选端点（内置目标），id/name 稳定 */
+  targetOptions: TargetOption[];
+  /** 球面角距尺端点选择状态：起/终点目标 id */
+  measureFromId: string | null;
+  measureToId: string | null;
+  /** 已选两端点的草稿球面角距（度），null 表示端点不全 */
+  draftSeparationDeg: number | null;
   onChangeSite: (site: SiteState) => void;
   onChangeTime: (iso: string) => void;
   onChangeFov: (fov: FovConfig) => void;
@@ -29,12 +42,16 @@ interface ControlsProps {
   onDeleteFov: (uuid: string) => void;
   onAddAnnotation: (text: string, color: string) => void;
   onDeleteAnnotation: (uuid: string) => void;
+  onPickMeasureEndpoint: (which: 'from' | 'to', targetId: string | null) => void;
+  onCreateMeasurement: (color: string) => void;
+  onDeleteMeasurement: (uuid: string) => void;
 }
 
 export default function Controls(p: ControlsProps) {
   const [fovName, setFovName] = useState('');
   const [noteText, setNoteText] = useState('');
   const [noteColor, setNoteColor] = useState('#ffd54a');
+  const [measureColor, setMeasureColor] = useState('#b6f0c9');
 
   const setRa = (v: number) => p.onChangeFov({ ...p.fov, centerRa: ((v % 360) + 360) % 360 });
   const setDec = (v: number) => p.onChangeFov({ ...p.fov, centerDec: Math.max(-90, Math.min(90, v)) });
@@ -148,6 +165,66 @@ export default function Controls(p: ControlsProps) {
           <input type="checkbox" checked={p.showGraticule} onChange={(e) => p.onToggleGraticule(e.target.checked)} />
           显示 J2000 经纬网
         </label>
+      </section>
+
+      <section className="ctl-block">
+        <h3>球面角距尺（选内置目标，量真实角距）</h3>
+        <p className="hint">
+          从内置目标中选起点、终点；角距按端点 J2000 坐标用 haversine 计算（短大圆弧），
+          切换投影、缩放或平移视场都不改变数值。图上的像素长度只是投影读数。
+        </p>
+        {p.draftSeparationDeg !== null && (
+          <p className="hint" style={{ color: '#b6f0c9' }}>
+            当前草稿角距：{p.draftSeparationDeg.toFixed(4)}°（未保存；切换投影或视场不变）
+          </p>
+        )}
+        <label>
+          起点（圆环 ○）
+          <select value={p.measureFromId ?? ''} onChange={(e) => p.onPickMeasureEndpoint('from', e.target.value || null)}>
+            <option value="">— 选择起点 —</option>
+            {p.targetOptions.map((t) => (
+              <option key={`f-${t.id}`} value={t.id}>
+                {t.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          终点（方块 ◇）
+          <select value={p.measureToId ?? ''} onChange={(e) => p.onPickMeasureEndpoint('to', e.target.value || null)}>
+            <option value="">— 选择终点 —</option>
+            {p.targetOptions.map((t) => (
+              <option key={`t-${t.id}`} value={t.id} disabled={t.id === p.measureFromId}>
+                {t.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <div className="save-row">
+          <input type="color" value={measureColor} onChange={(e) => setMeasureColor(e.target.value)} />
+          <button
+            className="btn"
+            disabled={!p.measureFromId || !p.measureToId || p.measureFromId === p.measureToId}
+            onClick={() => p.onCreateMeasurement(measureColor)}
+            title="测量记录随当前视场存入 IndexedDB；颜色用于三种视图中的短弧标注"
+          >
+            测量并记录
+          </button>
+        </div>
+        {p.measurements.length > 0 && (
+          <ul className="store-list">
+            {p.measurements.map((m) => (
+              <li key={m.uuid} title={`建档视场 中心 RA ${m.fov.centerRa.toFixed(1)}° Dec ${m.fov.centerDec.toFixed(1)}° r ${m.fov.radiusDeg}°；端点为 J2000 坐标`}>
+                <span className="dot" style={{ background: m.color }} />
+                <button className="link-btn" onClick={() => p.onChangeFov({ ...m.fov })} title="载入建档时的视场（测量本身不变）">
+                  {m.from.name} → {m.to.name}：{m.separationDeg.toFixed(3)}°
+                </button>
+                <button className="x-btn" onClick={() => p.onDeleteMeasurement(m.uuid)} title="仅删除该测量记录">×</button>
+              </li>
+            ))}
+          </ul>
+        )}
+        <p className="hint">删除测量只移除这条记录，不删除目标、视场或普通批注。</p>
       </section>
 
       <section className="ctl-block">

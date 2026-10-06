@@ -30,7 +30,8 @@ npm run preview    # 本地预览构建产物
 | 星等筛选与地平线裁切独立 | 两个独立开关；星等只作用于恒星，日月行星始终作为动态参考；地平以下恒星在关闭裁切时半透明显示 |
 | 极区 / 跨零 / 近地平星表样例 | "演示场景"三个一键预设；`data/catalog.ts` 星表带 `polar` / `zero-cross` / `bright` 标签 |
 | 两视图点击定位同一目标 | 任一视图点击 → 全局选中；三维视图飞行转向，两张投影图同步金色高亮 |
-| 导出注明坐标系与时间基准 | SVG / PNG / JSON 三种导出；图注写明 J2000.0 平赤道坐标系、UTC 时间、JD(TT)、GMST、台站经纬度、星等与裁切设置、投影变形说明 |
+| 球面角距尺 | 侧栏从内置目标选起终点（或信息面板"设为起/终点"）；`greatCircleArc()` 用 slerp 取**短大圆弧**，角距按端点 J2000 坐标 haversine 计算；天球（相机半球裁剪）与两种投影（`clipAngle` 球面裁剪）分别按各自规则绘制；记录随当前视场存 IndexedDB `measurements` 独立对象库；导出 SVG 图注/JSON 含端点坐标、坐标系与角距 |
+| 导出注明坐标系与时间基准 | SVG / PNG / JSON 三种导出；图注写明 J2000.0 平赤道坐标系、UTC 时间、JD(TT)、GMST、台站经纬度、星等与裁切设置、投影变形说明、每条角距尺的端点与球面角距 |
 
 ## 内置演示场景
 
@@ -49,17 +50,28 @@ src/
   data/catalog.ts      星表样例（J2000，三类标签）
   data/sites.ts        位置预设
   data/scenarios.ts    三个演示场景
-  lib/geoMath.ts       球面距离、大圆弧终点、视场边界、坐标格式化
+  lib/geoMath.ts       球面距离、短大圆弧 slerp 采样、大圆弧终点、视场边界、坐标格式化
   lib/astronomy.ts     astronomy-engine 唯一封装层（坐标转换/日月行星/恒星时）
   lib/computeSky.ts    合并目标、逐条转换、三条独立筛选
   lib/projections.ts   D3 两种投影构建、球面裁剪与比例尺标定
-  lib/exporter.ts      独立 SVG / PNG / JSON 导出（含完整图注）
-  lib/db.ts            IndexedDB Promise 封装
+  lib/exporter.ts      独立 SVG / PNG / JSON 导出（含完整图注与角距尺记录）
+  lib/db.ts            IndexedDB Promise 封装（fovs / annotations / measurements 三个独立对象库）
   components/          GlobeView / ProjectionView / Controls / InfoPanel
 ```
+
+## 球面角距尺
+
+1. 侧栏"球面角距尺"下拉选起点（圆环 ○）与终点（方块 ◇），或在任一视图点中目标后用信息面板的"设为起点/终点"；
+2. 角距按两端点 **J2000 赤经赤纬** haversine 计算，短弧由单位球 slerp 采样（`greatCircleArc`），
+   跨赤经零点（如 RA 359°↔1°）走 2° 短弧而非 358° 长弧，近对跖点也不崩溃；
+3. 三种视图各自绘制：天球视图按相机可见半球裁剪；两种投影按 `clipAngle` 在球面上裁剪（D3 对跖子午线自动切断）；
+4. **角距只取决于端点坐标**：切换立体/等距投影、改 FOV 中心或半径，数值不变（图上虚线像素长度只是投影读数）；
+5. 记录连同建档时视场存入 IndexedDB `measurements` 库；删除测量不影响目标、视场或普通批注；
+6. SVG/PNG 图注逐条写明端点名称与 J2000 坐标、坐标系、角距；JSON 导出含 `angularMeasurements` 数组。
 
 ## 图例
 
 - 圆形＝恒星，方形＝行星，菱形＝太阳/月球；金色环＝选中，蓝色环＝悬停
 - 绿色圆＝视场边界（球面小圆），蓝色虚线环＝等角距参考环
 - 红色线＝地平圈，红色半透明区＝地平以下半球；N/E/S/W 为方位基点
+- 彩色虚线＝角距尺短大圆弧，○＝起点、◇＝终点，弧上标签为球面角距（°）
